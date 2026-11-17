@@ -6,10 +6,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -131,7 +134,9 @@ func marshalDiscordPayload(event string, payload interface{}) ([]byte, error) {
 	})
 }
 
-func (d *Dispatcher) send(hook database.WebhookConfig, event string, payload interface{}) {
+// buildRequest renders the event in the format the receiver expects (Discord
+// embed, Slack text, or the generic signed JSON envelope).
+func buildRequest(hook database.WebhookConfig, event string, payload interface{}) (*http.Request, error) {
 	var body []byte
 	var err error
 
@@ -139,11 +144,9 @@ func (d *Dispatcher) send(hook database.WebhookConfig, event string, payload int
 		body, err = marshalDiscordPayload(event, payload)
 	} else if strings.Contains(hook.URL, "hooks.slack.com") {
 		detailsJSON, _ := json.Marshal(payload)
-		target := event
-		slackPayload := map[string]interface{}{
-			"text": fmt.Sprintf("*[%s]* %s\n```%s```", event, target, detailsJSON),
-		}
-		body, err = json.Marshal(slackPayload)
+		body, err = json.Marshal(map[string]interface{}{
+			"text": fmt.Sprintf("*[%s]* %s\n```%s```", event, event, detailsJSON),
+		})
 	} else {
 		body, err = json.Marshal(map[string]interface{}{
 			"event":     event,
@@ -152,15 +155,13 @@ func (d *Dispatcher) send(hook database.WebhookConfig, event string, payload int
 		})
 	}
 	if err != nil {
-		return
+		return nil, err
 	}
 
 	req, err := http.NewRequest(http.MethodPost, hook.URL, bytes.NewReader(body))
 	if err != nil {
-		log.Printf("webhook: bad URL %s: %v", hook.URL, err)
-		return
+		return nil, err
 	}
-
 	req.Header.Set("Content-Type", "application/json")
 
 	if !isDiscordURL(hook.URL) {
@@ -172,35 +173,53 @@ func (d *Dispatcher) send(hook database.WebhookConfig, event string, payload int
 			req.Header.Set("X-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 		}
 	}
+	return req, nil
+}
 
+// deliver makes a single delivery attempt and reports why it failed, if it did.
+func (d *Dispatcher) deliver(hook database.WebhookConfig, event string, payload interface{}) error {
+	req, err := buildRequest(hook, event, payload)
+	if err != nil {
+		return err
+	}
+	resp, err := d.client.Do(req)
+	if err != nil {
+		// The URL usually embeds a credential, so keep it out of the message.
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			err = uerr.Err
+		}
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
+		return fmt.Errorf("receiver answered %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
+	}
+	return nil
+}
+
+// SendTest delivers a "webhook.test" event to one webhook right away,
+// regardless of its subscriptions or active flag, and returns the outcome.
+func (d *Dispatcher) SendTest(hook database.WebhookConfig) error {
+	return d.deliver(hook, "webhook.test", map[string]interface{}{
+		"message": "Test notification — this webhook is reachable.",
+	})
+}
+
+func (d *Dispatcher) send(hook database.WebhookConfig, event string, payload interface{}) {
 	const maxRetries = 3
+	var err error
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		resp, err := d.client.Do(req)
-		if err == nil && resp.StatusCode < 400 {
-			resp.Body.Close()
+		if attempt > 0 {
+			time.Sleep(time.Duration(math.Pow(2, float64(attempt-1))) * time.Second)
+		}
+		if err = d.deliver(hook, event, payload); err == nil {
 			return
 		}
-		if resp != nil {
-			resp.Body.Close()
-		}
-		if attempt < maxRetries-1 {
-			backoff := time.Duration(math.Pow(2, float64(attempt))) * time.Second
-			time.Sleep(backoff)
-			// Rebuild request for retry
-			req, _ = http.NewRequest("POST", hook.URL, bytes.NewReader(body))
-			req.Header.Set("Content-Type", "application/json")
-			if !isDiscordURL(hook.URL) {
-				req.Header.Set("X-Event", event)
-				req.Header.Set("X-Timestamp", time.Now().UTC().Format(time.RFC3339))
-				if hook.Secret != "" {
-					mac := hmac.New(sha256.New, []byte(hook.Secret))
-					mac.Write(body)
-					req.Header.Set("X-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
-				}
-			}
-		}
+		log.Printf("webhook: %s to webhook %d failed (attempt %d/%d): %v", event, hook.ID, attempt+1, maxRetries, err)
 	}
-	log.Printf("webhook: permanently failed after %d retries: %s (%s)", maxRetries, hook.URL, event)
+	log.Printf("webhook: gave up delivering %s to webhook %d: %v", event, hook.ID, err)
 }
 
 func hasEvent(events, event string) bool {

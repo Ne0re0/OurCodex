@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { webhooksApi, Webhook } from '../lib/api'
-import { Plus, Trash2, ToggleLeft, ToggleRight, Copy, Check } from 'lucide-react'
+import { Plus, Trash2, ToggleLeft, ToggleRight, Copy, Check, Send } from 'lucide-react'
 import { useToast } from './ToastProvider'
 import { copyToClipboard } from '../lib/clipboard'
 
@@ -140,6 +140,11 @@ export default function Webhooks() {
     mutationFn: webhooksApi.delete,
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['webhooks'] }); toast('Deleted!', true) },
   })
+  const testMutation = useMutation({
+    mutationFn: webhooksApi.test,
+    onSuccess: () => toast('Test event delivered', true),
+    onError: (e: Error) => toast(e.message, false),
+  })
   const toggleMutation = useMutation({
     mutationFn: ({ id, active }: { id: number; active: boolean }) => webhooksApi.update(id, { active }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['webhooks'] }),
@@ -204,6 +209,14 @@ export default function Webhooks() {
                   </td>
                   <td className="px-6 py-4">
                     <div className="flex items-center justify-end gap-2">
+                      <button
+                        title="Send test event"
+                        disabled={testMutation.isPending}
+                        onClick={() => testMutation.mutate(hook.id)}
+                        className="p-1.5 text-gray-400 hover:text-brand-500 rounded disabled:opacity-50"
+                      >
+                        <Send className={`w-4 h-4 ${testMutation.isPending && testMutation.variables === hook.id ? 'animate-pulse' : ''}`} />
+                      </button>
                       <button
                         title={hook.active ? 'Pause' : 'Activate'}
                         onClick={() => toggleMutation.mutate({ id: hook.id, active: !hook.active })}

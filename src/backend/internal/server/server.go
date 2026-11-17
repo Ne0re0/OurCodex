@@ -194,7 +194,7 @@ func (s *Server) SetupAdminRouter() http.Handler {
 		r.Post("/api/admin/admins/{id}/generate-session", adminsH.GenerateSession)
 
 		// Webhooks
-		webhooksH := handlers.NewWebhooksHandler(s.db)
+		webhooksH := handlers.NewWebhooksHandler(s.db, s.webhooks)
 		r.Get("/api/admin/webhooks", webhooksH.List)
 		r.Post("/api/admin/webhooks", webhooksH.Create)
 		r.Put("/api/admin/webhooks/{id}", webhooksH.Update)

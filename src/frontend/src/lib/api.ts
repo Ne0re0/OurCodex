@@ -165,6 +165,7 @@ export const webhooksApi = {
   update: (id: number, body: { url?: string; events?: string; active?: boolean }) =>
             put(`/admin/webhooks/${id}`, body),
   delete: (id: number) => del(`/admin/webhooks/${id}`),
+  test:   (id: number) => post<{ message: string }>(`/admin/webhooks/${id}/test`, {}),
 }
 
 // Runtime Settings

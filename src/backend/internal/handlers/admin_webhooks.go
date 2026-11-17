@@ -5,16 +5,18 @@ import (
 	"net/http"
 
 	"codex-proxy/internal/database"
+	"codex-proxy/internal/webhook"
 
 	"gorm.io/gorm"
 )
 
 type WebhooksHandler struct {
-	db *gorm.DB
+	db         *gorm.DB
+	dispatcher *webhook.Dispatcher
 }
 
-func NewWebhooksHandler(db *gorm.DB) *WebhooksHandler {
-	return &WebhooksHandler{db: db}
+func NewWebhooksHandler(db *gorm.DB, dispatcher *webhook.Dispatcher) *WebhooksHandler {
+	return &WebhooksHandler{db: db, dispatcher: dispatcher}
 }
 
 // GET /api/admin/webhooks
@@ -115,7 +117,7 @@ func (h *WebhooksHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"message": "deleted"})
 }
 
-// POST /api/admin/webhooks/{id}/test — send a test payload
+// POST /api/admin/webhooks/{id}/test — deliver a test event now
 func (h *WebhooksHandler) Test(w http.ResponseWriter, r *http.Request) {
 	id, err := parseID(r)
 	if err != nil {
@@ -129,11 +131,9 @@ func (h *WebhooksHandler) Test(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// We don't have direct access to the dispatcher here, so we return the payload
-	// the receiver would get. The server wires in the dispatcher separately.
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"message": "test endpoint — trigger a real event or call the webhook URL manually",
-		"url":     hook.URL,
-		"events":  hook.Events,
-	})
+	if err := h.dispatcher.SendTest(hook); err != nil {
+		writeJSON(w, http.StatusBadGateway, errResp("delivery failed: "+err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "test event delivered"})
 }
